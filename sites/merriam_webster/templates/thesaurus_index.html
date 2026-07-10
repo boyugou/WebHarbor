@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% block title %}Thesaurus | Merriam-Webster{% endblock %}
+{% block content %}
+<div class="container section">
+  <h1 class="section-title">Merriam-Webster Thesaurus</h1>
+  <p class="muted">Browse every available thesaurus entry or search for a word.</p>
+  <form class="search-form hero-search" action="{{ url_for('search') }}" method="get" autocomplete="off">
+    <input type="hidden" name="type" value="thesaurus">
+    <input type="text" name="q" placeholder="Search the thesaurus" aria-label="Search the thesaurus" required>
+    <button type="submit">Search</button>
+  </form>
+  <div class="card-grid" style="margin-top:24px;">
+    {% for entry in entries %}
+    <a class="word-card" href="{{ url_for('thesaurus_detail', slug=entry.slug) }}">
+      <div class="wc-head">{{ entry.headword }}</div>
+      <div class="wc-def">{{ entry.short_def }}</div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

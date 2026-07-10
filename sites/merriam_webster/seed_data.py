@@ -96,14 +96,18 @@ PRIMARY_SAVED_SLUGS = ['eloquent', 'curiosity', 'harmony']
 
 
 def seed_benchmark_users(db, User, bcrypt, Word=None, SavedWord=None):
-    if User.query.filter_by(email='alice.j@test.com').first():
+    # This function runs on every normal restart as well as on a full reset.
+    # Once the benchmark account exists, the entire seed must be a no-op so
+    # task state (including intentionally removed saved words) is preserved.
+    if User.query.filter_by(email=PRIMARY_ACCOUNT['email']).first():
         return
+
     for u in BENCHMARK_USERS:
         user = User(email=u['email'], username=u['username'], name=u['name'])
         user.password_hash = bcrypt.generate_password_hash(
             u['password']).decode('utf-8')
         db.session.add(user)
-    db.session.commit()
+    db.session.flush()
 
     if Word is not None and SavedWord is not None:
         alice = User.query.filter_by(email='alice.j@test.com').first()
@@ -111,5 +115,5 @@ def seed_benchmark_users(db, User, bcrypt, Word=None, SavedWord=None):
             w = Word.query.filter_by(slug=slug).first()
             if w:
                 db.session.add(SavedWord(user_id=alice.id, word_id=w.id))
-        db.session.commit()
+    db.session.commit()
     print(f"Seeded {len(BENCHMARK_USERS)} benchmark users.")

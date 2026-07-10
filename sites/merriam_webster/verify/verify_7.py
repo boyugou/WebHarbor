@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verify_lib import (load_run, navigated_to, final_answer, last_shot, shot_after_url,
                         contains_all, contains_any, answer_equals, extract_years,
                         extract_score, resolve_db, saved_words_for, user_exists,
-                        llm_text_match, llm_screenshot_shows, Judge, parse_args)
+                        answer_list_equals, llm_text_match,
+                        llm_screenshot_shows, Judge, parse_args)
 
 def main():
     a = parse_args()
@@ -21,7 +22,10 @@ def main():
     fa = final_answer(t)
     j.check("nav_thesaurus_difficult", navigated_to(t, "/thesaurus/difficult"),
             f"navigated={navigated_to(t, '/thesaurus/difficult')}")
-    j.check("answer_C_synonyms", contains_all(fa, ["challenging", "complicated"]), f"final={fa!r}")
+    expected = ["challenging", "complicated"]
+    j.check("answer_C_synonyms", answer_list_equals(
+        fa, expected, ordered=False, context_words={"difficult"}
+    ), f"final={fa!r}")
     s = last_shot(t)
     if s:
         ok, ev = llm_screenshot_shows(s, "challenging", "synonyms of difficult, esp. ones starting with C")

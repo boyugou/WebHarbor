@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% block title %}{{ code }} — BBC News{% endblock %}
+{% block masthead %}{% endblock %}
+{% block content %}
+<main class="main-content error-page">
+    <div class="code">{{ code }}</div>
+    <h1>{{ message }}</h1>
+    <p>The page you requested could not be displayed.</p>
+    <a href="{{ url_for('index') }}">Return to BBC News</a>
+</main>
+{% endblock %}

@@ -1,10 +1,15 @@
 import asyncio
 import base64
+import hashlib
 import json
+import math
 import os
+import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from openai import OpenAI
 from browser_use import Browser, Tools
@@ -27,6 +32,7 @@ class AgentArgs:
     dom_char_limit: int = 12000
     judge_rubric: str = ""   # carried into trajectory.json for the LLM judge
     verifier_path: str = ""  # carried into trajectory.json for the verifier mode
+    container: str = os.environ.get("WH_CONTAINER", "wh-review")
 
     def post_process(self):
         if self.tasks_file:
@@ -117,15 +123,103 @@ def parse_action_json(raw):
     start = s.find("{")
     if start < 0:
         raise ValueError(f"no JSON in response: {raw[:200]!r}")
-    depth = 0
-    for i in range(start, len(s)):
-        if s[i] == "{":
-            depth += 1
-        elif s[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return json.loads(s[start : i + 1])
-    raise ValueError(f"unterminated JSON in response: {raw[:200]!r}")
+    if s[:start].strip():
+        raise ValueError("agent reply must contain JSON only")
+    def reject_nonfinite(value):
+        raise ValueError(f"non-finite JSON number {value!r} is not allowed")
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON key {key!r} is not allowed")
+            value[key] = item
+        return value
+
+    try:
+        value, end = json.JSONDecoder(
+            parse_constant=reject_nonfinite,
+            object_pairs_hook=reject_duplicate_keys,
+        ).raw_decode(s[start:])
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid JSON in response: {raw[:200]!r}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("agent reply must be a JSON object")
+    if s[start + end:].strip():
+        raise ValueError("agent reply must contain exactly one JSON object")
+    if set(value) != {"thought", "action", "params"}:
+        raise ValueError(
+            "agent reply must contain exactly thought, action, and params"
+        )
+    if not isinstance(value.get("thought"), str):
+        raise ValueError("agent reply field 'thought' must be a string")
+    action = value.get("action")
+    params = value.get("params")
+    if not isinstance(action, str) or not action:
+        raise ValueError("agent reply field 'action' must be a nonempty string")
+    if not isinstance(params, dict):
+        raise ValueError("agent reply field 'params' must be an object")
+
+    def exact_params(required):
+        if set(params) != set(required):
+            raise ValueError(
+                f"action {action!r} requires params {sorted(required)!r}"
+            )
+        for field, expected_type in required.items():
+            item = params[field]
+            if not isinstance(item, expected_type) or (
+                expected_type in {int, float} and isinstance(item, bool)
+            ):
+                raise ValueError(
+                    f"action {action!r} param {field!r} has an invalid type"
+                )
+
+    if action == "click":
+        exact_params({"index": int})
+        if params["index"] < 0:
+            raise ValueError("click index must be nonnegative")
+    elif action == "input":
+        exact_params({"index": int, "text": str})
+        if params["index"] < 0:
+            raise ValueError("input index must be nonnegative")
+    elif action == "scroll":
+        exact_params({"down": bool, "pages": (int, float)})
+        pages = params["pages"]
+        if (isinstance(pages, bool)
+                or pages <= 0
+                or pages > 100
+                or (isinstance(pages, float) and not math.isfinite(pages))):
+            raise ValueError("scroll pages must be a positive number no greater than 100")
+    elif action == "navigate":
+        exact_params({"url": str})
+        if not params["url"].strip():
+            raise ValueError("navigate url must be nonempty")
+    elif action == "go_back":
+        exact_params({})
+    elif action == "done":
+        exact_params({"text": str, "success": bool})
+    else:
+        raise ValueError(f"unsupported action: {action!r}")
+    return value
+
+
+def openai_client(api_base, api_key):
+    """Build an SDK client without letting base-URL queries swallow paths."""
+    parsed = urlsplit(api_base)
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    query_keys = [key for key, _ in query_pairs]
+    if len(query_keys) != len(set(query_keys)):
+        raise ValueError("OPENAI_BASE_URL must not contain duplicate query keys")
+    path = parsed.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        path = path[:-len("/chat/completions")] or "/"
+    base_url = urlunsplit(parsed._replace(path=path, query="", fragment=""))
+    default_query = dict(query_pairs)
+    return OpenAI(
+        base_url=base_url,
+        api_key=api_key,
+        default_query=default_query or None,
+    )
 
 
 def build_action_model(tools, action_name, params):
@@ -140,6 +234,49 @@ async def execute(tools, browser, name, params):
 
 def save_screenshot_b64(b64, path):
     Path(path).write_bytes(base64.b64decode(b64))
+
+
+def snapshot_verifier_db(verifier_path, container, kind, destination):
+    """Capture immutable per-run DB evidence for a site-local verifier."""
+    parts = Path(verifier_path).parts
+    if len(parts) < 4 or parts[0] != "sites" or parts[2] != "verify":
+        return False, ""
+    site = parts[1]
+    if not re.fullmatch(r"[a-z0-9_]+", site):
+        return False, "invalid verifier site name"
+    db_dir = f"/opt/WebSyn/{site}/{kind}"
+    listing = subprocess.run(
+        [
+            "docker", "exec", container, "find", db_dir,
+            "-maxdepth", "1", "-type", "f", "-name", "*.db", "-print",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    db_paths = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+    if listing.returncode != 0 or len(db_paths) != 1:
+        detail = listing.stderr.strip() or (
+            f"expected exactly one database in {db_dir}, found {db_paths!r}"
+        )
+        return False, detail
+    source = f"{container}:{db_paths[0]}"
+    result = subprocess.run(
+        ["docker", "cp", source, str(destination)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, result.stderr.strip() or result.stdout.strip()
+    destination.chmod(0o444)
+    return True, ""
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 async def run(args):
@@ -157,11 +294,23 @@ async def run(args):
     print(f"task_id={args.task_id or '<inline>'}  url={args.url}\n  ques: {args.task}")
 
     out = Path(args.out_dir)
+    generated_artifacts = [
+        out / "trajectory.json",
+        out / "initial_state.db",
+        out / "after_state.db",
+        out / "eval.json",
+    ]
+    generated_artifacts.extend((out / "screenshots").glob("step_*.png"))
+    if any(path.exists() for path in generated_artifacts):
+        raise SystemExit(
+            f"out_dir {out} contains artifacts from an earlier run; "
+            "choose a new or cleaned output directory"
+        )
     out.mkdir(parents=True, exist_ok=True)
     shots = out / "screenshots"
     shots.mkdir(exist_ok=True)
 
-    client = OpenAI(base_url=api_base, api_key=api_key)
+    client = openai_client(api_base, api_key)
 
     # Connect to an externally-launched headless Chrome via CDP when MW_CDP_URL is
     # set. browser-use's own Browser() launcher can hang on some hosts (watchdog
@@ -194,6 +343,15 @@ async def run(args):
             "judge_rubric": args.judge_rubric,
             "verifier_path": args.verifier_path,
         }
+        initial_db_path = out / "initial_state.db"
+        initial_ok, initial_error = snapshot_verifier_db(
+            args.verifier_path, args.container, "instance", initial_db_path
+        )
+        if initial_ok:
+            trajectory["initial_db_snapshot"] = initial_db_path.name
+            trajectory["initial_db_sha256"] = file_sha256(initial_db_path)
+        elif args.verifier_path:
+            trajectory["initial_db_snapshot_error"] = initial_error
 
         for step_idx in range(args.max_steps):
             dom_text = state.dom_state.llm_representation()
@@ -251,7 +409,7 @@ async def run(args):
                     "is_done": getattr(result, "is_done", None),
                     "success": getattr(result, "success", None),
                     "error": getattr(result, "error", None),
-                    "extracted_content": (getattr(result, "extracted_content", None) or "")[:500],
+                    "extracted_content": (getattr(result, "extracted_content", None) or ""),
                 }
             except Exception as e:
                 step_log["action_result"] = {"error": f"{type(e).__name__}: {e}"}
@@ -261,6 +419,16 @@ async def run(args):
             save_screenshot_b64(state.screenshot, shots / f"step_{step_idx + 1:03d}.png")
         else:
             trajectory["termination_reason"] = "max_steps"
+
+        after_db_path = out / "after_state.db"
+        after_ok, after_error = snapshot_verifier_db(
+            args.verifier_path, args.container, "instance", after_db_path
+        )
+        if after_ok:
+            trajectory["after_db_snapshot"] = after_db_path.name
+            trajectory["after_db_sha256"] = file_sha256(after_db_path)
+        elif args.verifier_path:
+            trajectory["after_db_snapshot_error"] = after_error
 
         traj_path = out / "trajectory.json"
         traj_path.write_text(json.dumps(trajectory, indent=2))

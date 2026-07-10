@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verify_lib import (load_run, navigated_to, final_answer, last_shot, shot_after_url,
                         contains_all, contains_any, answer_equals, extract_years,
                         extract_score, resolve_db, saved_words_for, user_exists,
-                        llm_text_match, llm_screenshot_shows, Judge, parse_args)
+                        answer_contains_exact_fact, llm_text_match,
+                        llm_screenshot_shows, Judge, parse_args)
 
 def main():
     a = parse_args()
@@ -22,7 +23,8 @@ def main():
     j.check("nav_ubiquitous", navigated_to(t, "/dictionary/ubiquitous"),
             f"navigated={navigated_to(t, '/dictionary/ubiquitous')}")
     EXPECTED = "existing or being everywhere at the same time : constantly encountered : widespread"
-    j.check("answer_sense1", answer_equals(fa, EXPECTED), f"final={fa!r}")
+    j.check("answer_sense1", answer_contains_exact_fact(fa, EXPECTED),
+            f"final={fa!r}")
     s = last_shot(t)
     if s:
         ok, ev = llm_screenshot_shows(s, EXPECTED, "first numbered definition of ubiquitous")

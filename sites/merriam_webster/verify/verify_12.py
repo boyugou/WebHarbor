@@ -4,14 +4,14 @@
 Synonym Showdown quiz: answer all + report final score.
 
 Checks (deterministic first; LLM utilities anchored on ground truth):
-nav /quiz/synonym-showdown + reached /submit | reported score X/10 (deterministic) | result screenshot shows matching score
+ordered quiz/result navigation | reported score matches the server-issued result URL | optional screenshot diagnostic
 Input/Output: see verify_lib.parse_args / Judge.emit.
 """
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from verify_lib import (load_run, navigated_to, final_answer, last_shot, shot_after_url,
+from verify_lib import (load_run, navigated_to, navigated_in_order, final_answer, last_shot, shot_after_url,
                         contains_all, contains_any, answer_equals, extract_years,
-                        extract_score, resolve_db, saved_words_for, user_exists,
+                        extract_score, quiz_result_score, resolve_db, saved_words_for, user_exists,
                         llm_text_match, llm_screenshot_shows, Judge, parse_args)
 
 def main():
@@ -23,8 +23,18 @@ def main():
             f"navigated={navigated_to(t, '/quiz/synonym-showdown')}")
     j.check("reached_result_page", navigated_to(t, "/quiz/synonym-showdown/submit"),
             f"navigated_submit={navigated_to(t, '/quiz/synonym-showdown/submit')}")
+    j.check("nav_quiz_flow_in_order", navigated_in_order(t, [
+        "/quiz/synonym-showdown", "/quiz/synonym-showdown/submit",
+    ]), "quiz and result pages visited in order")
     score = extract_score(fa)
-    j.check("reported_score_X_over_10", score is not None, f"final={fa!r}")
+    initial = resolve_db(a.initial_db, a.container, "instance_seed")
+    after = resolve_db(a.after_db, a.container, "instance")
+    issued_score = quiz_result_score(
+        t, "/quiz/synonym-showdown/submit", "synonym-showdown", initial, after
+    )
+    j.check("reported_score_X_over_10", score is not None
+            and score == issued_score,
+            f"final={fa!r} issued_score={issued_score!r}")
     s = shot_after_url(t, "/quiz/synonym-showdown/submit") or last_shot(t)
     if s and score is not None:
         ok, ev = llm_screenshot_shows(s, "Your Score " + score + " / 10",

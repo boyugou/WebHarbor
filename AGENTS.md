@@ -96,6 +96,7 @@ uv run playwright install chromium               # one-time
 export OPENAI_API_KEY=...                        # bearer token
 export OPENAI_BASE_URL=https://api.openai.com/v1  # OpenAI-compatible base URL
 export JUDGE_MODEL=gpt-5.1                       # model id for agent + judge + verifier LLM utils
+export WH_CONTAINER=wh-test                      # immutable verifier DB snapshots
 ```
 
 Run a task from a site's `tasks.jsonl` (per-line keys: `web_name, id, ques, web, upstream_url`; the reviewer later adds optional `verifier_path` and `judge_rubric` — see CONTRIBUTING.md "Reviewer role"). The agent reads `--task` / `--url` either inline or from `--tasks_file [--task_id ID]`:
@@ -166,7 +167,7 @@ Contributors write `sites/<site>/tasks.jsonl` with ONLY the task definition per 
 When you self-check a task is feasible before opening the PR, drive it with the agent and eyeball the trajectory:
 
 ```bash
-export OPENAI_API_KEY=... OPENAI_BASE_URL=http://api.openai.com/v1 JUDGE_MODEL=GPT-5
+export OPENAI_API_KEY=... OPENAI_BASE_URL=https://api.openai.com/v1 JUDGE_MODEL=GPT-5 WH_CONTAINER=wh-test
 uv run python agent_demo/agent.py --tasks_file sites/<site>/tasks.jsonl \
         --task_id "<site>--N" --url http://localhost:40000+i/ --out_dir runs/N
 # confirm the trajectory actually solves the task by navigating the site

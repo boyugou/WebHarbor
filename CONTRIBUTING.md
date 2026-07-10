@@ -196,7 +196,7 @@ The `merriam_webster` review is the reference example of this step: several orig
 
 For each task the reviewer accepts, the reviewer writes the grading artifacts and records them in `tasks.jsonl`:
 
-1. **A deterministic verifier** — one Python script per task, placed under the **site's own** `sites/<site>/verify/` directory (so each site is self-contained; verifiers never live under `agent_demo/`). It emits a binary PASS/FAIL from the run signature `(initial_state, after_state, trajectory, agent final output)`. Deterministic-first (navigation / regex / token / SQLite after-state); LLM only as an anchored utility. The ground truth is **HARDCODED inside the verifier** — never in `tasks.jsonl` (the agent reads that file; an answer key there leaks answers). See `sites/merriam_webster/verify/verify_lib.py` for the shared utilities (`load_run`, `navigated_to`, `llm_text_match`, `llm_screenshot_shows`, SQLite helpers, the `Judge` harness) and `sites/merriam_webster/verify/verify_*.py` for one-per-task examples.
+1. **A deterministic verifier** — one Python script per task, placed under the **site's own** `sites/<site>/verify/` directory (so each site is self-contained; verifiers never live under `agent_demo/`). It emits a binary PASS/FAIL from the run signature `(initial_state, after_state, trajectory, agent final output)`. Verifier mode disables optional LLM checks and grades navigation / regex / token / SQLite after-state deterministically; the helpers remain available for direct diagnostic runs. The ground truth is **HARDCODED inside the verifier** — never in `tasks.jsonl` (the agent reads that file; an answer key there leaks answers). See `sites/merriam_webster/verify/verify_lib.py` for the shared utilities (`load_run`, `navigated_to`, `llm_text_match`, `llm_screenshot_shows`, SQLite helpers, the `Judge` harness) and `sites/merriam_webster/verify/verify_*.py` for one-per-task examples.
 2. **`verifier_path`** in the task row — the relative path (from repo root) to that verifier, e.g. `sites/merriam_webster/verify/verify_0.py`.
 3. **`judge_rubric`** in the task row — a short English block of "FACT CHECKPOINTS" the LLM judge verifies (which pages the agent MUST have opened, which facts/answers MUST appear, that an empty answer is a FAIL). The rubric states the *rules*, not the answers, so it's safe for the agent to see.
 
@@ -226,7 +226,8 @@ All three tools read the same env vars (CLI flags override):
 Run an agent task and grade it (reviewer validation loop):
 
 ```bash
-export OPENAI_API_KEY=...  OPENAI_BASE_URL=http://api.openai.com/v1  JUDGE_MODEL=GPT-5
+export OPENAI_API_KEY=...  OPENAI_BASE_URL=https://api.openai.com/v1  JUDGE_MODEL=GPT-5
+export WH_CONTAINER=wh-test  # agent captures immutable verifier DB snapshots here
 # agent (writes trajectory.json + screenshots/, carries judge_rubric in)
 uv run python agent_demo/agent.py --tasks_file sites/<site>/tasks.jsonl \
        --task_id "<site>--N" --url http://localhost:40000+i/ --out_dir runs/x
@@ -277,4 +278,8 @@ Sites must not import from one another. The image launches each as an independen
 
 ### Don't hard-code secrets
 
-Each site sets `SECRET_KEY` to a deterministic dev value. Acceptable for a benchmark image (resets blow away sessions anyway). If a contrib ever needs real secrets, raise it in an issue first.
+Sites may use a deterministic development `SECRET_KEY`, or generate a runtime
+key inside `instance/`. Runtime keys survive `/restart/<site>` but are deleted
+and rotated by `/reset/<site>`, along with the rest of `instance/`. They are
+benchmark session keys, never production secrets. If a contribution needs a
+real external secret, raise it in an issue first.

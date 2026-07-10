@@ -17,12 +17,9 @@
     <div class="wotd-feature">
       <div>
         <div class="wotd-label">Word of the Day</div>
-        <a href="{{ url_for('word_of_the_day') }}"><h2 class="wotd-word">{{ wotd.headword }}</h2></a>
-        <div class="wotd-pos">{{ wotd.pos }}
-          {% if wotd.pronunciation %}<span class="wotd-pron">| {{ wotd.pronunciation }}</span>{% endif %}
-        </div>
-        <p class="wotd-def">{{ wotd.definition }}</p>
-        <a class="btn btn-outline" href="{{ url_for('word_of_the_day') }}">See the full entry</a>
+        <h2 class="wotd-word">Discover today's featured word</h2>
+        <p class="wotd-def">Explore its pronunciation, meaning, history, and examples on the dedicated Word of the Day page.</p>
+        <a class="btn btn-outline" href="{{ url_for('word_of_the_day') }}">Reveal the Word of the Day</a>
       </div>
     </div>
   </div>

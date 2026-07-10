@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verify_lib import (load_run, navigated_to, final_answer, last_shot, shot_after_url,
                         contains_all, contains_any, answer_equals, extract_years,
                         extract_score, resolve_db, saved_words_for, user_exists,
-                        llm_text_match, llm_screenshot_shows, Judge, parse_args)
+                        answer_list_equals, llm_text_match,
+                        llm_screenshot_shows, Judge, parse_args)
 
 def main():
     a = parse_args()
@@ -22,7 +23,9 @@ def main():
     j.check("nav_thesaurus_brave", navigated_to(t, "/thesaurus/brave"),
             f"navigated={navigated_to(t, '/thesaurus/brave')}")
     SYN = ["courageous", "fearless", "valiant", "heroic", "gallant", "bold", "adventurous", "intrepid"]
-    j.check("answer_all_8_synonyms", contains_all(fa, SYN), f"final={fa!r}")
+    j.check("answer_all_8_synonyms_in_order", answer_list_equals(
+        fa, SYN, context_words={"brave"}
+    ), f"final={fa!r}")
     s = last_shot(t)
     if s:
         ok, ev = llm_screenshot_shows(s, ", ".join(SYN), "synonyms of brave shown on the thesaurus page")

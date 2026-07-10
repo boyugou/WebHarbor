@@ -94,7 +94,7 @@ secrets.json
 # ============================================================
 # Agent demo results
 # =============================================================
-agent_demo/runs/.claude/ralph-loop.local.md
+agent_demo/runs/
 .claude/ralph-loop.local.md
 sites/*/.claude/
 sites/*/download_pill_images.py

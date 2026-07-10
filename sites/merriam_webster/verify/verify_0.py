@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verify_lib import (load_run, navigated_to, final_answer, last_shot, shot_after_url,
                         contains_all, contains_any, answer_equals, extract_years,
                         extract_score, resolve_db, saved_words_for, user_exists,
-                        llm_text_match, llm_screenshot_shows, Judge, parse_args)
+                        answer_contains_exact_fact, llm_text_match,
+                        llm_screenshot_shows, Judge, parse_args)
 
 def main():
     a = parse_args()
@@ -24,7 +25,7 @@ def main():
     # Deterministic answer check: the task explicitly asks for the respelling WITH its
     # accent marks as shown, so the leading secondary-stress ˌ + primary-stress ˈdi must
     # both appear. (An agent that drops the leading ˌ has not reported it 'as shown'.)
-    j.check("answer_has_stress_marks", contains_all(fa, ["ˌser", "ˈdi", "pə", "tē"]),
+    j.check("answer_has_exact_respelling", answer_contains_exact_fact(fa, "ˌser-ən-ˈdi-pə-tē"),
             f"final={fa!r}")
     ok, ev = llm_text_match(fa, "ˌser-ən-ˈdi-pə-tē",
         "What is the Merriam-Webster respelling pronunciation of serendipity?")

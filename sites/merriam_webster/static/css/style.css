@@ -68,6 +68,13 @@ a:hover { text-decoration: underline; }
 }
 .header-nav a:hover { background: var(--mw-red); text-decoration: none; }
 .header-nav .nav-account { margin-left: auto; }
+.nav-logout-form { margin: 0; }
+.nav-logout-button {
+  display: block; color: #fff; padding: 11px 16px; border: 0;
+  background: transparent; font: inherit; font-size: .85rem;
+  text-transform: uppercase; letter-spacing: .5px; cursor: pointer;
+}
+.nav-logout-button:hover { background: var(--mw-red); }
 
 /* ---------------- Hero / homepage ---------------- */
 .hero {

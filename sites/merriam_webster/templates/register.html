@@ -17,17 +17,17 @@
     </div>
     <div class="form-group">
       <label for="email">Email</label>
-      {{ form.email(id='email') }}
+      {{ form.email(id='email', maxlength='120') }}
       {% for e in form.email.errors %}<div class="form-error">{{ e }}</div>{% endfor %}
     </div>
     <div class="form-group">
       <label for="password">Password</label>
-      {{ form.password(id='password') }}
+      {{ form.password(id='password', maxlength='72') }}
       {% for e in form.password.errors %}<div class="form-error">{{ e }}</div>{% endfor %}
     </div>
     <div class="form-group">
       <label for="confirm">Confirm Password</label>
-      {{ form.confirm(id='confirm') }}
+      {{ form.confirm(id='confirm', maxlength='72') }}
       {% for e in form.confirm.errors %}<div class="form-error">{{ e }}</div>{% endfor %}
     </div>
     <button class="btn" type="submit">Sign Up</button>

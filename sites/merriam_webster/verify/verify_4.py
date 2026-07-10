@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verify_lib import (load_run, navigated_to, final_answer, last_shot, shot_after_url,
                         contains_all, contains_any, answer_equals, extract_years,
                         extract_score, resolve_db, saved_words_for, user_exists,
-                        llm_text_match, llm_screenshot_shows, Judge, parse_args)
+                        answer_contains_exact_fact, llm_text_match,
+                        llm_screenshot_shows, Judge, parse_args)
 
 def main():
     a = parse_args()
@@ -22,7 +23,8 @@ def main():
     j.check("nav_meticulous", navigated_to(t, "/dictionary/meticulous"),
             f"navigated={navigated_to(t, '/dictionary/meticulous')}")
     yrs = extract_years(fa)
-    j.check("answer_year_1827", "1827" in yrs, f"years_found={yrs} final={fa!r}")
+    j.check("answer_year_1827", answer_contains_exact_fact(fa, "1827") and yrs == ["1827"],
+            f"years_found={yrs} final={fa!r}")
     s = last_shot(t)
     if s:
         ok, ev = llm_screenshot_shows(s, "First Known Use: 1827",

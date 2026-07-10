@@ -4,27 +4,47 @@
 Login alice + save resilient & gratitude; confirm both on My Words.
 
 Checks (deterministic first; LLM utilities anchored on ground truth):
-nav /login,/account | DB after: resilient and gratitude in alice saved words | screenshot shows account page
+ordered login/both entries/account navigation | immutable DB transition adds both words | optional screenshot diagnostic
 Input/Output: see verify_lib.parse_args / Judge.emit.
 """
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from verify_lib import (load_run, navigated_to, final_answer, last_shot, shot_after_url,
+from verify_lib import (load_run, navigated_to, navigated_in_order, finished_at, final_answer, last_shot, shot_after_url,
                         contains_all, contains_any, answer_equals, extract_years,
                         extract_score, resolve_db, saved_words_for, user_exists,
-                        llm_text_match, llm_screenshot_shows, Judge, parse_args)
+                        answer_confirms_action, llm_text_match,
+                        llm_screenshot_shows, Judge, parse_args)
 
 def main():
     a = parse_args()
     j = Judge('Merriam-Webster--15', a.no_llm)
     t = load_run(a.run_dir)
     fa = final_answer(t)
+    j.check("final_confirms_saves", answer_confirms_action(
+        fa, ["resilient", "gratitude"],
+        r"\b(?:saved|added|appear|appears|present|listed)\b",
+    ), f"final={fa!r}")
     j.check("nav_login", navigated_to(t, "/login"), f"navigated={navigated_to(t, '/login')}")
+    for word in ["resilient", "gratitude"]:
+        j.check(f"nav_{word}", navigated_to(t, "/dictionary/" + word),
+                f"navigated={navigated_to(t, '/dictionary/' + word)}")
     j.check("nav_account", navigated_to(t, "/account"), f"navigated={navigated_to(t, '/account')}")
+    j.check("nav_save_flow_in_order", navigated_in_order(t, [
+        "/login", "/dictionary/resilient", "/dictionary/gratitude", "/account",
+    ]) or navigated_in_order(t, [
+        "/login", "/dictionary/gratitude", "/dictionary/resilient", "/account",
+    ]), "login, both entries, and account pages visited in order")
+    j.check("finished_on_account", finished_at(t, "/account"),
+            "final action occurred on the account page")
     after = resolve_db(a.after_db, a.container, "instance")
+    init = resolve_db(a.initial_db, a.container, "instance_seed")
     aw = saved_words_for(after)
+    iw = saved_words_for(init)
     j.check("db_resilient_saved", aw is not None and "resilient" in (aw or []), f"after_saved={aw}")
     j.check("db_gratitude_saved", aw is not None and "gratitude" in (aw or []), f"after_saved={aw}")
+    j.check("db_words_absent_initial", iw is not None
+            and "resilient" not in (iw or []) and "gratitude" not in (iw or []),
+            f"initial_saved={iw}")
     s = last_shot(t)
     if s:
         ok, ev = llm_screenshot_shows(s, "resilient", "saved-words list including resilient and gratitude")

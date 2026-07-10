@@ -9,7 +9,12 @@ import os
 import re
 import json
 import random
+import secrets
+import threading
+import time
+import unicodedata
 from datetime import datetime, date
+from urllib.parse import urlsplit
 
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, jsonify, session, abort)
@@ -21,12 +26,44 @@ from flask_wtf.csrf import CSRFProtect
 from flask_bcrypt import Bcrypt
 from wtforms import StringField, PasswordField
 from wtforms.validators import DataRequired, Email, Length, EqualTo
-from sqlalchemy import or_, func
+from sqlalchemy import event, or_, func, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RUNTIME_INSTANCE_DIR = os.path.join(BASE_DIR, 'instance')
+os.makedirs(RUNTIME_INSTANCE_DIR, exist_ok=True)
+
+
+def _load_runtime_secret_key():
+    configured = os.environ.get('MW_SECRET_KEY')
+    if configured:
+        return configured
+    path = os.path.join(RUNTIME_INSTANCE_DIR, '.secret_key')
+    try:
+        with open(path, encoding='utf-8') as f:
+            stored = f.read().strip()
+        if len(stored) >= 32:
+            return stored
+    except FileNotFoundError:
+        pass
+    generated = secrets.token_hex(32)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        for _ in range(50):
+            with open(path, encoding='utf-8') as f:
+                stored = f.read().strip()
+            if len(stored) >= 32:
+                return stored
+            time.sleep(0.01)
+        raise RuntimeError('runtime secret key file was not initialized')
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as f:
+        f.write(generated)
+    return generated
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'merriam-webster-mirror-secret-key'
+app.config['SECRET_KEY'] = _load_runtime_secret_key()
 # DB path is overridable so the seed-regeneration tooling can write
 # instance_seed/ instead of the runtime instance/. Default = runtime DB.
 DB_PATH = os.environ.get('MW_DB_PATH',
@@ -34,8 +71,17 @@ DB_PATH = os.environ.get('MW_DB_PATH',
 app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{DB_PATH}"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['WTF_CSRF_TIME_LIMIT'] = None
+app.config['MAX_CONTENT_LENGTH'] = 1_000_000
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+@event.listens_for(Engine, 'connect')
+def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute('PRAGMA foreign_keys=ON')
+    cursor.close()
+
+os.makedirs(os.path.dirname(DB_PATH) or '.', exist_ok=True)
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
@@ -47,6 +93,80 @@ csrf = CSRFProtect(app)
 
 STOPWORDS = {'a', 'an', 'the', 'of', 'to', 'in', 'on', 'for', 'and', 'or',
              'is', 'are', 'be', 'with', 'as', 'by', 'at', 'from'}
+_saved_words_lock = threading.Lock()
+_registration_lock = threading.Lock()
+_history_locks = {}
+_history_locks_guard = threading.Lock()
+_MAX_SEARCH_HISTORY = 100
+_QUIZ_RESULT_SESSION = '_quiz_result'
+_MAX_RUNTIME_PROOFS = 1_000
+
+
+@app.before_request
+def _bound_query_parameters():
+    pairs = list(request.args.items(multi=True))
+    if len(pairs) > 100 or any(
+        len(key) > 120 or len(value) > 2_048 for key, value in pairs
+    ):
+        abort(400)
+
+
+def _history_lock(user_id):
+    with _history_locks_guard:
+        return _history_locks.setdefault(user_id, threading.Lock())
+
+
+def _record_search_history(term):
+    if not current_user.is_authenticated:
+        return
+    term = (term or '').strip()[:200]
+    if not term:
+        return
+    with _history_lock(current_user.id):
+        db.session.add(SearchHistory(user_id=current_user.id, term=term))
+        db.session.flush()
+        stale_ids = [
+            row[0]
+            for row in (
+                db.session.query(SearchHistory.id)
+                .filter(SearchHistory.user_id == current_user.id)
+                .order_by(SearchHistory.created_at.desc(), SearchHistory.id.desc())
+                .offset(_MAX_SEARCH_HISTORY)
+                .all()
+            )
+        ]
+        if stale_ids:
+            SearchHistory.query.filter(SearchHistory.id.in_(stale_ids)).delete(
+                synchronize_session=False
+            )
+        db.session.commit()
+
+
+def _safe_next_url(value):
+    if (
+        not value or len(value) > 2_048 or value.startswith('//') or '\\' in value
+        or any(ord(ch) < 32 for ch in value)
+    ):
+        return None
+    try:
+        parts = urlsplit(value)
+    except (ValueError, UnicodeError):
+        return None
+    if (
+        not parts.scheme and not parts.netloc
+        and parts.path.startswith('/') and not parts.path.startswith('//')
+    ):
+        return value
+    return None
+
+
+def _password_too_long(password):
+    return len((password or '').encode('utf-8')) > 72
+
+
+def _normalize_identity(value):
+    """Canonicalize login identifiers before case-insensitive comparison."""
+    return unicodedata.normalize('NFC', (value or '').strip()).casefold()
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +193,12 @@ class User(db.Model, UserMixin):
         self.password_hash = bcrypt.generate_password_hash(pw).decode('utf-8')
 
     def check_password(self, pw):
-        return bcrypt.check_password_hash(self.password_hash, pw)
+        if _password_too_long(pw):
+            return False
+        try:
+            return bcrypt.check_password_hash(self.password_hash, pw)
+        except ValueError:
+            return False
 
 
 class Word(db.Model):
@@ -211,15 +336,15 @@ def load_user(user_id):
 class RegisterForm(FlaskForm):
     name = StringField('Name', validators=[DataRequired(), Length(max=120)])
     username = StringField('Username', validators=[DataRequired(), Length(min=3, max=80)])
-    email = StringField('Email', validators=[DataRequired(), Email()])
-    password = PasswordField('Password', validators=[DataRequired(), Length(min=6)])
+    email = StringField('Email', validators=[DataRequired(), Email(), Length(max=120)])
+    password = PasswordField('Password', validators=[DataRequired(), Length(min=6, max=72)])
     confirm = PasswordField('Confirm Password',
                             validators=[DataRequired(), EqualTo('password')])
 
 
 class LoginForm(FlaskForm):
-    email = StringField('Email', validators=[DataRequired()])
-    password = PasswordField('Password', validators=[DataRequired()])
+    email = StringField('Email', validators=[DataRequired(), Length(max=120)])
+    password = PasswordField('Password', validators=[DataRequired(), Length(max=72)])
 
 
 # ---------------------------------------------------------------------------
@@ -306,8 +431,12 @@ def todays_wotd():
 @app.route('/')
 def index():
     wotd = todays_wotd()
-    trending = Word.query.order_by(func.random()).limit(8).all()
-    browse = Word.query.order_by(Word.headword).limit(12).all()
+    featured_name = wotd.headword if wotd else ""
+    visible_words = Word.query.filter(
+        func.lower(Word.headword) != featured_name.lower()
+    )
+    trending = visible_words.order_by(Word.id).limit(8).all()
+    browse = visible_words.order_by(Word.headword).limit(12).all()
     return render_template('index.html', wotd=wotd, trending=trending,
                            browse=browse)
 
@@ -315,10 +444,7 @@ def index():
 @app.route('/dictionary/<slug>')
 def word_detail(slug):
     word = Word.query.filter_by(slug=slug).first_or_404()
-    if current_user.is_authenticated:
-        db.session.add(SearchHistory(user_id=current_user.id,
-                                     term=word.headword))
-        db.session.commit()
+    _record_search_history(word.headword)
     is_saved = False
     if current_user.is_authenticated:
         is_saved = SavedWord.query.filter_by(
@@ -347,28 +473,31 @@ def thesaurus_detail(slug):
     return render_template('thesaurus_detail.html', entry=entry, word=word)
 
 
+@app.route('/thesaurus')
+def thesaurus_index():
+    entries = ThesaurusEntry.query.order_by(ThesaurusEntry.headword).all()
+    return render_template('thesaurus_index.html', entries=entries)
+
+
 @app.route('/search')
 def search():
     q = request.args.get('q', '').strip()
     stype = request.args.get('type', 'dictionary')
+    if len(q) > 200 or len(stype) > 20:
+        abort(400)
     if not q:
         return render_template('search.html', q='', results=[],
                                thes_results=[], stype=stype)
 
     exact = Word.query.filter(Word.headword.ilike(q)).first()
     if exact and stype == 'dictionary':
-        if current_user.is_authenticated:
-            db.session.add(SearchHistory(user_id=current_user.id, term=q))
-            db.session.commit()
         return redirect(url_for('word_detail', slug=exact.slug))
 
     results = search_words(q)
     thes_results = ThesaurusEntry.query.filter(
         ThesaurusEntry.headword.ilike(f'%{q}%')).limit(10).all()
 
-    if current_user.is_authenticated:
-        db.session.add(SearchHistory(user_id=current_user.id, term=q))
-        db.session.commit()
+    _record_search_history(q)
     return render_template('search.html', q=q, results=results,
                            thes_results=thes_results, stype=stype)
 
@@ -377,6 +506,8 @@ def search():
 @csrf.exempt
 def autocomplete():
     q = request.args.get('q', '').strip().lower()
+    if len(q) > 120:
+        abort(400)
     if len(q) < 2:
         return jsonify([])
     words = Word.query.filter(Word.headword.ilike(f'{q}%')).limit(8).all()
@@ -416,10 +547,86 @@ def quiz_detail(slug):
                            questions=quiz.get_questions())
 
 
-@app.route('/quiz/<slug>/submit', methods=['POST'])
+def _ensure_quiz_result_proof_table():
+    db.session.execute(text(
+        'CREATE TABLE IF NOT EXISTS benchmark_quiz_result_proof ('
+        'token TEXT PRIMARY KEY, slug TEXT NOT NULL, score INTEGER NOT NULL, '
+        'total INTEGER NOT NULL, created_at INTEGER NOT NULL)'
+    ))
+
+
+def _quiz_review(questions, picked_indexes):
+    review = []
+    score = 0
+    for qq, picked_index in zip(questions, picked_indexes, strict=True):
+        correct = qq.get('answer_index')
+        ok = picked_index == correct
+        if ok:
+            score += 1
+        review.append({
+            'q': qq.get('q'),
+            'choices': qq.get('choices', []),
+            'picked': picked_index,
+            'answer_index': correct,
+            'explanation': qq.get('explanation', ''),
+            'correct': ok,
+        })
+    return score, review
+
+
+@app.route('/quiz/<slug>/submit', methods=['GET', 'POST'])
 def quiz_submit(slug):
     quiz = Quiz.query.filter_by(slug=slug).first_or_404()
     questions = quiz.get_questions()
+    if request.method == 'GET':
+        stored = session.get(_QUIZ_RESULT_SESSION)
+        if not isinstance(stored, dict) or stored.get('slug') != slug:
+            abort(404)
+        picked_indexes = stored.get('picked')
+        if not (
+            isinstance(picked_indexes, list)
+            and len(picked_indexes) == len(questions)
+            and all(isinstance(value, int) and not isinstance(value, bool)
+                    for value in picked_indexes)
+        ):
+            abort(404)
+        if any(
+            not 0 <= picked_index < len(question.get('choices', []))
+            for picked_index, question in zip(
+                picked_indexes, questions, strict=True
+            )
+        ):
+            abort(404)
+        score, review = _quiz_review(questions, picked_indexes)
+        total = len(questions)
+        supplied_score = request.args.get('score')
+        supplied_total = request.args.get('total')
+        supplied_token = request.args.get('token') or ''
+        stored_token = stored.get('token') or ''
+        proof_row = None
+        if supplied_token and supplied_token == stored_token:
+            table_exists = db.session.execute(text(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'benchmark_quiz_result_proof'"
+            )).scalar() is not None
+            if table_exists:
+                proof_row = db.session.execute(
+                    text(
+                        'SELECT score, total FROM benchmark_quiz_result_proof '
+                        'WHERE token = :token AND slug = :slug'
+                    ),
+                    {'token': supplied_token, 'slug': slug},
+                ).first()
+        if (
+            supplied_score != str(score)
+            or supplied_total != str(total)
+            or proof_row is None
+            or tuple(proof_row) != (score, total)
+        ):
+            abort(404)
+        return render_template('quiz_result.html', quiz=quiz, score=score,
+                               total=total, review=review)
+
     # Require EVERY question to be answered before scoring. Without this the
     # result page is untrustworthy (an unanswered question rendered the same as
     # a correct one) and "answer all questions" tasks could be gamed by leaving
@@ -430,34 +637,67 @@ def quiz_submit(slug):
         flash(f'Please answer every question before submitting. '
               f'Not answered: {", ".join(missing)}.', 'error')
         return redirect(url_for('quiz_detail', slug=quiz.slug))
-    score = 0
-    review = []
+    picked_indexes = []
     for i, qq in enumerate(questions):
         picked = request.form.get(f'q{i}')
         correct = qq.get('answer_index')
-        ok = int(picked) == correct
-        if ok:
-            score += 1
-        review.append({
-            'q': qq.get('q'),
-            'choices': qq.get('choices', []),
-            'picked': int(picked),
-            'answer_index': correct,
-            'explanation': qq.get('explanation', ''),
-            'correct': ok,
-        })
+        try:
+            picked_index = int(picked)
+        except (TypeError, ValueError):
+            flash('A quiz answer was invalid. Please try again.', 'error')
+            return redirect(url_for('quiz_detail', slug=quiz.slug))
+        if not 0 <= picked_index < len(qq.get('choices', [])):
+            flash('A quiz answer was invalid. Please try again.', 'error')
+            return redirect(url_for('quiz_detail', slug=quiz.slug))
+        picked_indexes.append(picked_index)
+    score, _review = _quiz_review(questions, picked_indexes)
     total = len(questions)
     if current_user.is_authenticated:
         db.session.add(QuizScore(user_id=current_user.id, quiz_id=quiz.id,
                                  score=score, total=total))
-        db.session.commit()
-    return render_template('quiz_result.html', quiz=quiz, score=score,
-                           total=total, review=review)
+    result_token = secrets.token_urlsafe(24)
+    _ensure_quiz_result_proof_table()
+    db.session.execute(
+        text(
+            'INSERT INTO benchmark_quiz_result_proof '
+            '(token, slug, score, total, created_at) '
+            'VALUES (:token, :slug, :score, :total, unixepoch())'
+        ),
+        {
+            'token': result_token,
+            'slug': slug,
+            'score': score,
+            'total': total,
+        },
+    )
+    db.session.execute(text(
+        'DELETE FROM benchmark_quiz_result_proof WHERE rowid NOT IN ('
+        'SELECT rowid FROM benchmark_quiz_result_proof '
+        'ORDER BY created_at DESC, rowid DESC LIMIT '
+        f'{_MAX_RUNTIME_PROOFS})'
+    ))
+    db.session.commit()
+    session[_QUIZ_RESULT_SESSION] = {
+        'slug': slug,
+        'picked': picked_indexes,
+        'token': result_token,
+    }
+    return redirect(url_for(
+        'quiz_submit', slug=slug, score=score, total=total,
+        token=result_token,
+    ))
 
 
 # ---------------------------------------------------------------------------
 # Routes — auth & account
 # ---------------------------------------------------------------------------
+
+def _ensure_auth_proof_table():
+    db.session.execute(text(
+        'CREATE TABLE IF NOT EXISTS benchmark_auth_proof ('
+        'token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, '
+        'created_at INTEGER NOT NULL)'
+    ))
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -465,19 +705,51 @@ def register():
         return redirect(url_for('index'))
     form = RegisterForm()
     if form.validate_on_submit():
-        if User.query.filter_by(email=form.email.data.lower()).first():
-            flash('That email is already registered.', 'error')
-        elif User.query.filter_by(username=form.username.data).first():
-            flash('That username is taken.', 'error')
+        email = _normalize_identity(form.email.data)
+        username = _normalize_identity(form.username.data)
+        if _password_too_long(form.password.data):
+            flash('Password must be 72 bytes or fewer.', 'error')
         else:
-            u = User(email=form.email.data.lower(),
-                     username=form.username.data, name=form.name.data)
-            u.set_password(form.password.data)
-            db.session.add(u)
-            db.session.commit()
+            # SQLite's default UNIQUE collation is case-sensitive while login
+            # accepts case-insensitive usernames. Normalize new usernames and
+            # serialize the check/insert so case variants cannot race.
+            with _registration_lock:
+                if User.query.filter_by(email=email).first():
+                    flash('That email is already registered.', 'error')
+                    return render_template('register.html', form=form)
+                if User.query.filter_by(username=username).first():
+                    flash('That username is taken.', 'error')
+                    return render_template('register.html', form=form)
+                u = User(email=email, username=username,
+                         name=form.name.data.strip())
+                u.set_password(form.password.data)
+                db.session.add(u)
+                auth_token = secrets.token_urlsafe(24)
+                try:
+                    db.session.flush()
+                    _ensure_auth_proof_table()
+                    db.session.execute(
+                        text(
+                            'INSERT INTO benchmark_auth_proof '
+                            '(token, user_id, created_at) '
+                            'VALUES (:token, :user_id, unixepoch())'
+                        ),
+                        {'token': auth_token, 'user_id': u.id},
+                    )
+                    db.session.execute(text(
+                        'DELETE FROM benchmark_auth_proof WHERE rowid NOT IN ('
+                        'SELECT rowid FROM benchmark_auth_proof '
+                        'ORDER BY created_at DESC, rowid DESC LIMIT '
+                        f'{_MAX_RUNTIME_PROOFS})'
+                    ))
+                    db.session.commit()
+                except IntegrityError:
+                    db.session.rollback()
+                    flash('That email or username is already registered.', 'error')
+                    return render_template('register.html', form=form)
             login_user(u)
             flash('Welcome to Merriam-Webster!', 'success')
-            return redirect(url_for('index'))
+            return redirect(url_for('account', auth=auth_token))
     return render_template('register.html', form=form)
 
 
@@ -486,19 +758,21 @@ def login():
     if current_user.is_authenticated:
         return redirect(url_for('index'))
     form = LoginForm()
+    next_url = _safe_next_url(request.args.get('next'))
     if form.validate_on_submit():
-        ident = form.email.data.strip().lower()
+        ident = _normalize_identity(form.email.data)
         user = (User.query.filter_by(email=ident).first()
-                or User.query.filter(func.lower(User.username) == ident).first())
+                or User.query.filter_by(username=ident).first())
         if user and user.check_password(form.password.data):
             login_user(user)
             flash('Logged in successfully.', 'success')
-            return redirect(request.args.get('next') or url_for('index'))
+            return redirect(next_url or url_for('index'))
         flash('Invalid email or password.', 'error')
-    return render_template('login.html', form=form)
+    return render_template('login.html', form=form, next_url=next_url)
 
 
-@app.route('/logout')
+@app.route('/logout', methods=['POST'])
+@login_required
 def logout():
     logout_user()
     flash('You have been logged out.', 'info')
@@ -508,6 +782,23 @@ def logout():
 @app.route('/account')
 @login_required
 def account():
+    auth_token = request.args.get('auth')
+    if auth_token:
+        table_exists = db.session.execute(text(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'benchmark_auth_proof'"
+        )).scalar() is not None
+        proof_user_id = None
+        if table_exists:
+            proof_user_id = db.session.execute(
+                text(
+                    'SELECT user_id FROM benchmark_auth_proof '
+                    'WHERE token = :token'
+                ),
+                {'token': auth_token},
+            ).scalar()
+        if proof_user_id != current_user.id:
+            abort(404)
     saved = (SavedWord.query.filter_by(user_id=current_user.id)
              .order_by(SavedWord.created_at.desc()).all())
     history = (SearchHistory.query.filter_by(user_id=current_user.id)
@@ -521,9 +812,14 @@ def account():
 @app.route('/account/saved-words/<int:sw_id>/remove', methods=['POST'])
 @login_required
 def remove_saved(sw_id):
-    sw = SavedWord.query.filter_by(id=sw_id, user_id=current_user.id).first_or_404()
-    db.session.delete(sw)
-    db.session.commit()
+    with _saved_words_lock:
+        sw = SavedWord.query.filter_by(
+            id=sw_id, user_id=current_user.id
+        ).first_or_404()
+        SavedWord.query.filter_by(
+            user_id=current_user.id, word_id=sw.word_id
+        ).delete(synchronize_session=False)
+        db.session.commit()
     flash('Removed from your saved words.', 'info')
     return redirect(url_for('account'))
 
@@ -534,13 +830,14 @@ def save_word(word_id):
     word = db.session.get(Word, word_id)
     if not word:
         abort(404)
-    existing = SavedWord.query.filter_by(user_id=current_user.id,
-                                         word_id=word.id).first()
-    if not existing:
-        db.session.add(SavedWord(user_id=current_user.id, word_id=word.id))
-        db.session.commit()
-        flash(f'Saved "{word.headword}" to your words.', 'success')
-    return redirect(request.referrer or url_for('word_detail', slug=word.slug))
+    with _saved_words_lock:
+        existing = SavedWord.query.filter_by(user_id=current_user.id,
+                                             word_id=word.id).first()
+        if not existing:
+            db.session.add(SavedWord(user_id=current_user.id, word_id=word.id))
+            db.session.commit()
+            flash(f'Saved "{word.headword}" to your words.', 'success')
+    return redirect(url_for('word_detail', slug=word.slug))
 
 
 @app.route('/_health')

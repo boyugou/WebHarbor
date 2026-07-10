@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verify_lib import (load_run, navigated_to, final_answer, last_shot, shot_after_url,
                         contains_all, contains_any, answer_equals, extract_years,
                         extract_score, resolve_db, saved_words_for, user_exists,
-                        llm_text_match, llm_screenshot_shows, Judge, parse_args)
+                        answer_list_equals, llm_text_match,
+                        llm_screenshot_shows, Judge, parse_args)
 
 def main():
     a = parse_args()
@@ -22,7 +23,9 @@ def main():
     j.check("nav_thesaurus_calm", navigated_to(t, "/thesaurus/calm"),
             f"navigated={navigated_to(t, '/thesaurus/calm')}")
     ANT = ["angry", "turbulent", "restless", "agitated", "stormy", "unsettled", "rough", "tempestuous"]
-    j.check("answer_all_8_antonyms", contains_all(fa, ANT), f"final={fa!r}")
+    j.check("answer_all_8_antonyms", answer_list_equals(
+        fa, ANT, ordered=False, context_words={"calm"}
+    ), f"final={fa!r}")
     s = last_shot(t)
     if s:
         ok, ev = llm_screenshot_shows(s, ", ".join(ANT), "antonyms of calm shown on the thesaurus page")

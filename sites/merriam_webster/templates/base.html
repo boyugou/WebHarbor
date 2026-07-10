@@ -24,12 +24,17 @@
       <div class="container">
         <ul>
           <li><a href="{{ url_for('index') }}">Dictionary</a></li>
-          <li><a href="{{ url_for('thesaurus_detail', slug='happy') }}">Thesaurus</a></li>
+          <li><a href="{{ url_for('thesaurus_index') }}">Thesaurus</a></li>
           <li><a href="{{ url_for('word_of_the_day') }}">Word of the Day</a></li>
           <li><a href="{{ url_for('games_quizzes') }}">Games &amp; Quizzes</a></li>
           {% if current_user.is_authenticated %}
           <li class="nav-account"><a href="{{ url_for('account') }}">My Words</a></li>
-          <li><a href="{{ url_for('logout') }}">Log Out</a></li>
+          <li>
+            <form method="post" action="{{ url_for('logout') }}" class="nav-logout-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="nav-logout-button">Log Out</button>
+            </form>
+          </li>
           {% else %}
           <li class="nav-account"><a href="{{ url_for('login') }}">Log In</a></li>
           <li><a href="{{ url_for('register') }}">Sign Up</a></li>
@@ -55,7 +60,7 @@
       <div>
         <strong>Merriam-Webster</strong><br>
         <a href="{{ url_for('index') }}">Dictionary</a> ·
-        <a href="{{ url_for('thesaurus_detail', slug='happy') }}">Thesaurus</a> ·
+        <a href="{{ url_for('thesaurus_index') }}">Thesaurus</a> ·
         <a href="{{ url_for('word_of_the_day') }}">Word of the Day</a>
       </div>
       <div>

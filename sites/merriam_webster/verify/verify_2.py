@@ -7,12 +7,13 @@ Checks (deterministic first; LLM utilities anchored on ground truth):
 nav /dictionary/nostalgia | answer contains 'Greek nóstos' + 'return, homecoming' (deterministic) | screenshot shows etymology
 Input/Output: see verify_lib.parse_args / Judge.emit.
 """
-import os, sys
+import os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verify_lib import (load_run, navigated_to, final_answer, last_shot, shot_after_url,
                         contains_all, contains_any, answer_equals, extract_years,
                         extract_score, resolve_db, saved_words_for, user_exists,
-                        llm_text_match, llm_screenshot_shows, Judge, parse_args)
+                        answer_is_affirmative, fact_is_asserted, fact_is_negated, llm_text_match,
+                        llm_screenshot_shows, Judge, parse_args)
 
 def main():
     a = parse_args()
@@ -23,7 +24,10 @@ def main():
             f"navigated={navigated_to(t, '/dictionary/nostalgia')}")
     # answer must name the Greek source word + its meaning; phrasing varies (agent may
     # drop the literal word "Greek"), so check the key tokens separately, not contiguously.
-    j.check("answer_has_greek_nostos", contains_all(fa, ["nóstos", "return", "homecoming"]),
+    exact_quote = re.search(r"nóstos\s*[\"“']return,\s*homecoming[\"”']", fa, re.IGNORECASE)
+    j.check("answer_has_greek_nostos", answer_is_affirmative(fa) and bool(exact_quote)
+            and fact_is_asserted(fa, r"nóstos\s*[\"“']return,\s*homecoming[\"”']")
+            and not fact_is_negated(fa, r"\bnóstos\b"),
             f"final={fa!r}")
     s = last_shot(t)
     if s:
